@@ -5,12 +5,14 @@
 ## 🌟 功能特性
 
 ### 核心功能
+
 - **智能方向检测**: 自动检测图像旋转角度并进行校正
 - **文本区域检测**: 识别图像中的文本区域和边界
 - **智能裁剪**: 基于边缘检测自动裁剪图像，去除无关区域
 - **轮廓分析**: 检测和分析图像中的表格轮廓结构
 
 ### 技术特色
+
 - **深度学习模型**: 集成PaddleOCR的先进模型进行方向分类和文本检测
 - **多阶段处理**: 采用轮廓检测→文本检测→方向校正的完整处理流程
 - **边缘感知**: 智能识别接近图像边缘的元素并进行相应处理
@@ -19,6 +21,7 @@
 ## 🛠 技术架构
 
 ### 核心技术栈
+
 - **Web框架**: FastAPI - 高性能异步Web框架
 - **OCR引擎**: PaddleOCR - 百度开源的深度学习OCR工具包
 - **图像处理**: OpenCV - 计算机视觉和图像处理库
@@ -26,6 +29,7 @@
 - **部署**: Uvicorn - 轻量级ASGI服务器
 
 ### 模型配置
+
 - **方向分类模型**: PP-LCNet_x1_0_doc_ori
 - **文本检测模型**: PP-OCRv5_server_det
 - **最大矩形检测**: 自定义MaxRectangleDetector类
@@ -39,9 +43,11 @@
 接收图片文件，返回矫正后的表格图像。
 
 **请求参数**:
+
 - `file` (UploadFile): 需要处理的图片文件
 
 **返回格式**:
+
 - 成功: 矫正后的图像文件流
 - 失败: HTTP异常信息
 
@@ -52,41 +58,64 @@
 获取服务基本信息和API文档。
 
 **返回示例**:
+
 ```json
 {
-    "service": "表格矫正服务",
-    "version": "1.0.0",
-    "endpoint": "/correct_detection_table",
-    "method": "POST",
-    "description": "接收图片，返回矫正后的表格图片"
+  "service": "表格矫正服务",
+  "version": "1.0.0",
+  "endpoint": "/correct_detection_table",
+  "method": "POST",
+  "description": "接收图片，返回矫正后的表格图片"
 }
 ```
 
 ## 🔧 安装和配置
 
+###
+
+```
+docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9
+
+docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9 /bin/bash
+
+apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0
+
+
+root@esc8000-g4:/home# cd /paddle/
+root@esc8000-g4:/paddle# nvidia-smi
+
+
+
+```
+
 ### 环境要求
+
 - Python 3.7+
 - PaddlePaddle 2.4+
 - FastAPI 0.68+
 - OpenCV 4.5+
 
 ### 依赖安装
+
 ```bash
 pip install fastapi uvicorn paddleocr opencv-python loguru python-multipart
 ```
 
 ### 环境变量配置
+
 - `LOG_LEVEL`: 日志级别 (默认: DEBUG)
 - `LOG_FILE`: 日志文件路径 (默认: ./logs/monitor.log)
 
 ## 🚀 启动服务
 
 ### 开发模式
+
 ```bash
 python table_correction_service.py
 ```
 
 ### 生产部署
+
 ```bash
 uvicorn table_correction_service:app --host 0.0.0.0 --port 8001 --workers 4
 ```
@@ -124,6 +153,7 @@ uvicorn table_correction_service:app --host 0.0.0.0 --port 8001 --workers 4
 ## 📁 输出结构
 
 ### 输出目录
+
 ```
 output/                    # 主要输出目录
 ├── contours_img/         # 轮廓检测结果
@@ -132,6 +162,7 @@ output/                    # 主要输出目录
 ```
 
 ### 日志管理
+
 - **控制台日志**: 彩色格式化输出
 - **文件日志**: 自动轮转和清理
 - **调试信息**: 详细的处理过程记录
@@ -139,11 +170,13 @@ output/                    # 主要输出目录
 ## 🔍 性能优化
 
 ### 图像处理优化
+
 - **阈值自适应**: 根据图像内容动态调整处理参数
 - **区域裁剪**: 减少后续处理的数据量
 - **并行处理**: 支持批量图像处理
 
 ### 内存管理
+
 - **流式处理**: 避免大文件内存占用
 - **及时清理**: 自动释放临时资源
 - **缓存策略**: 智能缓存常用数据
@@ -151,11 +184,13 @@ output/                    # 主要输出目录
 ## 🛡 错误处理
 
 ### 异常处理机制
+
 - **输入验证**: 严格的文件格式和大小检查
 - **处理异常**: 完善的异常捕获和处理
 - **降级策略**: 异常情况下的优雅降级
 
 ### 质量保证
+
 - **置信度过滤**: 基于模型置信度的结果过滤
 - **多重验证**: 交叉验证处理结果
 - **回退机制**: 处理失败时的备选方案
@@ -163,11 +198,13 @@ output/                    # 主要输出目录
 ## 🔧 扩展功能
 
 ### 可配置参数
+
 - **面积阈值**: 轮廓检测的敏感度调节
 - **边缘阈值**: 边缘检测的精度控制
 - **置信度阈值**: OCR结果的可靠性过滤
 
 ### 自定义扩展
+
 - **模型替换**: 支持集成其他OCR引擎
 - **处理插件**: 可插拔的图像处理模块
 - **输出格式**: 支持多种输出格式定制
@@ -175,12 +212,14 @@ output/                    # 主要输出目录
 ## 📈 应用场景
 
 ### 典型用例
+
 - **文档数字化**: 纸质表格的电子化转换
 - **数据提取**: 结构化表格数据的自动提取
 - **质量增强**: 提升模糊表格图像的可读性
 - **批量处理**: 大规模表格图像的自动化处理
 
 ### 行业应用
+
 - **金融行业**: 财务报表、申请表单处理
 - **医疗领域**: 病历表格、检测报告整理
 - **教育行业**: 试卷表格、成绩单处理
@@ -189,12 +228,14 @@ output/                    # 主要输出目录
 ## 🤝 贡献指南
 
 ### 开发环境
+
 1. Fork项目仓库
 2. 创建功能分支
 3. 提交代码更改
 4. 发起Pull Request
 
 ### 代码规范
+
 - 遵循PEP 8编码规范
 - 添加适当的注释和文档
 - 包含单元测试用例
@@ -207,6 +248,7 @@ output/                    # 主要输出目录
 ## 🆘 支持与联系
 
 如在使用过程中遇到问题，请通过以下方式联系：
+
 - 提交Issue
 - 发送邮件
 - 技术社区讨论
