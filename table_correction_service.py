@@ -539,103 +539,138 @@ async def correct_detection_table(
                 x2 = min(w, x2)
                 y2 = min(h, y2)
                 
-                # 将最大表格区域加入到table_regions
-                max_table_region = {
-                    'bbox': (x1, y1, x2, y2),
-                    'center': ((x1 + x2) // 2, (y1 + y2) // 2),
-                    'width': x2 - x1,
-                    'height': y2 - y1
-                }
-                table_regions.append(max_table_region)
-                logger.info(f"检测到表格区域: 位置=({x1},{y1}), 尺寸={x2-x1}x{y2-y1}")
-            else:
-                logger.warning("未能使用MaxRectangleDetector找到表格区域，尝试使用轮廓和文本检测方法")
-                # 处理图像时确保图像不为空
-                processed_img = process_image_for_contours(rotated_img, timestamp=timestamp)
-                os.makedirs(f"./output_contours/", exist_ok=True)
-                # 检查处理后的图像是否为空
-                if processed_img is not None and len(processed_img.shape) > 1:
-                    cv2.imwrite(f"./output_contours/{timestamp}.jpg", processed_img)
+                rect_w = x2 - x1
+                rect_h = y2 - y1
+
+                # -------------------------------------------------------
+                # 检测主矩形框外侧是否存在"半幅表格"
+                # 逻辑：扫描 x1 左侧 和 x2 右侧区域，寻找与主矩形高度相近
+                # 的长竖线（即半幅表格的外边线）。
+                # 检测方法：对该区域做灰度→二值化→形态学竖线提取→按列求和。
+                # -------------------------------------------------------
+                # -------------------------------------------------------
+                # 检测方法改为「三段像素密度」投影：
+                # 将扫描区域的 y 范围均分为上、中、下三段，分别统计每列的
+                # 暗像素占比。如果某列在全部三段的暗像素比例均 ≥ 阈值，
+                # 则该列为贯通上下的竖直边缘（容忍中间有缺口/切口的情况）。
+                # -------------------------------------------------------
+                half_table_found = False
+                half_table_side = None  # 'left' or 'right'
+                # 每段内某列暗像素占该段高度的最低比例（可调整）
+                ZONE_DARK_RATIO = 0.08
+
+                def detect_vertical_lines_in_region(img_bgr, rx1, rx2, ry1, ry2):
+                    """
+                    三段密度检测：将 [ry1, ry2] 分成上、中、下三段，
+                    对每段做灰度→二值化→按列求暗像素比例。
+                    若某列在三段中均 ≥ ZONE_DARK_RATIO，认为是贯通竖线。
+                    返回 (是否找到, 符合列的原图 x 坐标列表)。
+                    """
+                    if rx1 >= rx2 or ry1 >= ry2:
+                        return False, []
+                    zone_h = ry2 - ry1
+                    third = zone_h // 3
+                    zones = [
+                        (ry1,                ry1 + third),          # 上段
+                        (ry1 + third,        ry1 + 2 * third),      # 中段
+                        (ry1 + 2 * third,    ry2),                  # 下段
+                    ]
+                    # 各段的暗像素比例矩阵，shape = (n_zones, width)
+                    zone_ratios = []
+                    for zs, ze in zones:
+                        roi = img_bgr[zs:ze, rx1:rx2]
+                        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                        # 简单阈值：<180 视为暗（线条像素）
+                        dark_mask = (gray < 180).astype(np.float32)
+                        ratio = dark_mask.mean(axis=0)  # shape: (width,)
+                        zone_ratios.append(ratio)
+                    # 三段均满足密度阈值的列
+                    combined = np.ones(rx2 - rx1, dtype=bool)
+                    for r in zone_ratios:
+                        combined &= (r >= ZONE_DARK_RATIO)
+                    cols = np.where(combined)[0]
+                    abs_cols = [rx1 + int(c) for c in cols]
+                    return len(abs_cols) > 0, abs_cols
+
+                # 扫描左侧区域（从 0 到 x1）
+                found_left, left_line_cols = detect_vertical_lines_in_region(
+                    rotated_img, 0, x1, y1, y2
+                )
+                # 扫描右侧区域（从 x2 到 图像右边缘）
+                img_h, img_w = rotated_img.shape[:2]
+                found_right, right_line_cols = detect_vertical_lines_in_region(
+                    rotated_img, x2, img_w, y1, y2
+                )
+
+                if found_left:
+                    half_table_found = True
+                    half_table_side = 'left'
+                    logger.info(f"检测到左侧半幅表格，外边线 x 坐标: {left_line_cols}")
+                if found_right:
+                    half_table_found = True
+                    half_table_side = ('both' if half_table_side == 'left' else 'right')
+                    logger.info(f"检测到右侧半幅表格，外边线 x 坐标: {right_line_cols}")
+
+                if half_table_found:
+                    # 存在半幅表格，按半幅表格边线裁剪：
+                    # 左侧：从左外边线(min) 到右页边缘 → 去掉左侧细边距
+                    # 右侧：从左页边缘 到右内边线(min) → 去掉右侧半表格
+                    if found_left and found_right:
+                        crop_x1 = min(left_line_cols)
+                        crop_x2 = min(right_line_cols)
+                        logger.info(f"两侧均有半幅表格，从左外边线x={crop_x1}截到右内边线x={crop_x2}")
+                    elif found_left:
+                        crop_x1 = min(left_line_cols)
+                        crop_x2 = img_w
+                        logger.info(f"左侧有半幅表格，从外边线x={crop_x1}截到右页边缘x={crop_x2}")
+                    else:  # found_right only
+                        crop_x1 = 0
+                        crop_x2 = min(right_line_cols)
+                        logger.info(f"右侧有半幅表格，从左页边缘x=0截到右内边线x={crop_x2}")
+
+                    crop_y1 = 0
+                    crop_y2 = img_h
+                    cropped_img = rotated_img[crop_y1:crop_y2, crop_x1:crop_x2]
+                    logger.info(f"裁剪后区域: 位置=({crop_x1},{crop_y1}), 尺寸={crop_x2-crop_x1}x{crop_y2-crop_y1}")
+
+                    is_success, buffer = cv2.imencode(".jpg", cropped_img)
+                    if not is_success:
+                        logger.error("无法将截取的图像编码为JPEG格式")
+                        raise Exception("无法将截取的图像编码为JPEG格式")
+
+                    os.makedirs("./output", exist_ok=True)
+                    cropped_img_path = f"./output/{timestamp}.jpg"
+                    cv2.imwrite(cropped_img_path, cropped_img)
+                    logger.info(f"已截取区域并保存到: {cropped_img_path}")
+
+                    return StreamingResponse(
+                        io.BytesIO(buffer.tobytes()),
+                        media_type="image/jpeg"
+                    )
                 else:
-                    # 如果处理后的图像为空，使用原始图像
-                    cv2.imwrite(f"./output_contours/{timestamp}.jpg", rotated_img)
-                # 更新rotated_img，确保不为空
-                rotated_img = processed_img if processed_img is not None and len(processed_img.shape) > 1 else rotated_img
-                logger.info(f"已保存轮廓处理后的图像到: ./output_contours/{timestamp}.jpg")
-                cropped_image =  process_image_for_text(rotated_img, timestamp=timestamp)
-                os.makedirs(f"./output_text", exist_ok=True)
-                cv2.imwrite(f"./output_text/{timestamp}.jpg", cropped_image)
-                logger.info(f"已保存文本处理后的图像到: ./output_text/{timestamp}.jpg")
-                # 对result_image进行文字检测
-                output_text = text_detection_model.predict(cropped_image, batch_size=1)
-                text_regions = []
-                text_json_path = f"./output_json/{timestamp}.json"
+                    # 未发现相邻半幅表格，直接返回旋转矫正后的原图
+                    logger.info("未检测到相邻半幅表格，返回矫正后的原图")
+                    img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
+                    is_success, buffer = cv2.imencode(".jpg", img_to_encode)
+                    if not is_success:
+                        logger.error("无法将图像编码为JPEG格式")
+                        raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
+                    return StreamingResponse(
+                        io.BytesIO(buffer.tobytes()),
+                        media_type="image/jpeg"
+                    )
+            else:
+                logger.warning("未能获取最大矩形框，直接返回原图")
+                # 检查rotated_img是否为空，为空时使用原始图像
+                img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
                 
-                for res in output_text:
-                    res.save_to_json(text_json_path)
-               
-                         
-                if 'dt_polys' in output_text[0] and 'dt_scores' in output_text[0]:
-                    dt_polys = output_text[0]['dt_polys']
-                    dt_scores = output_text[0]['dt_scores']
-                    
-                    for i, poly in enumerate(dt_polys):
-                        x_coords = [point[0] for point in poly]
-                        y_coords = [point[1] for point in poly]
-                        x1, y1 = int(min(x_coords)), int(min(y_coords))
-                        x2, y2 = int(max(x_coords)), int(max(y_coords))
-                        
-                        text_regions.append({
-                            'bbox': (x1, y1, x2, y2),
-                            'center': ((x1 + x2) // 2, (y1 + y2) // 2),
-                            'score': dt_scores[i]
-                        })
-                
-                # 在result_image上绘制文本区域并保存
-                if text_regions:
-                    # img_with_text_boxes = cropped_image
-                    
-                    # 初始化边界区域
-                    min_x = float('inf')
-                    min_y = float('inf')
-                    max_x = 0
-                    max_y = 0
-                    
-                    # 遍历所有文本框，找到整体边界
-                    for region in text_regions:
-                        x1, y1, x2, y2 = region['bbox']
-                        # cv2.rectangle(img_with_text_boxes, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        
-                        # 更新边界值
-                        min_x = min(min_x, x1)
-                        min_y = min(min_y, y1)
-                        max_x = max(max_x, x2)
-                        max_y = max(max_y, y2)
-                    
-                    
-                    # 截取整体文本区域
-                    if min_x < max_x and min_y < max_y:
-                        # 确保坐标在图像范围内
-                        h, w = cropped_image.shape[:2]
-                        min_x = max(0, min_x)
-                        min_y = max(0, min_y)
-                        max_x = min(w, max_x)
-                        max_y = min(h, max_y)
-                        
-                        # 截取区域
-                        cropped_text_region = cropped_image[min_y:max_y, min_x:max_x]
-                        
-                        # 保存截取的文本区域
-                        text_region_path = f"./output/text_region_{timestamp}.jpg"
-                        cv2.imwrite(text_region_path, cropped_text_region)
-                        logger.info(f"已截取文本区域并保存到: {text_region_path}")
-                
-                is_success, buffer = cv2.imencode(".jpg", cropped_text_region)
+                # 将原图转换为可流式传输的格式
+                is_success, buffer = cv2.imencode(".jpg", img_to_encode)
                 if not is_success:
                     logger.error("无法将图像编码为JPEG格式")
                     raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
                 
-                logger.info("成功处理图像请求，返回处理后的图像")
+                # 返回原始图像
                 return StreamingResponse(
                     io.BytesIO(buffer.tobytes()),
                     media_type="image/jpeg"
@@ -678,135 +713,7 @@ async def correct_detection_table(
         )
  
     
-    # 在原始旋转图像上绘制mask区域的矩形框并保存
-    # if table_regions:
-    #     # 获取第一个表格区域的边界框坐标
-    #     table_region = table_regions[0]
-    #     x1, y1, x2, y2 = table_region['bbox']
-        
-        # # 创建原始旋转图像的副本
-        # img_with_box = rotated_img.copy()
-        
-        # # 在图像上绘制红色矩形框，线宽为2
-        # cv2.rectangle(img_with_box, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        
-        # # 使用时间戳生成唯一文件名
 
-        # boxed_img_path = f"./output_mask/boxed_img_{timestamp}.jpg"
-        # os.makedirs("./output_mask", exist_ok=True)
-        # cv2.imwrite(boxed_img_path, img_with_box)
-        # print(f"已保存带矩形框的图像到: {boxed_img_path}")
-    
-    output_text = text_detection_model.predict(rotated_img, batch_size=1)
-    text_regions = []
-    text_json_path = f"./output_json/text_result_{timestamp}.json"
-    
-    for res in output_text:
-        res.save_to_json(text_json_path)
-    
-
-            
-    if 'dt_polys' in output_text[0] and 'dt_scores' in output_text[0]:
-        dt_polys = output_text[0]['dt_polys']
-        dt_scores = output_text[0]['dt_scores']
-        
-        for i, poly in enumerate(dt_polys):
-            x_coords = [point[0] for point in poly]
-            y_coords = [point[1] for point in poly]
-            x1, y1 = int(min(x_coords)), int(min(y_coords))
-            x2, y2 = int(max(x_coords)), int(max(y_coords))
-            
-            text_regions.append({
-                'bbox': (x1, y1, x2, y2),
-                'center': ((x1 + x2) // 2, (y1 + y2) // 2),
-                'score': dt_scores[i]
-            })
-    
-    # 6. 查找表格标题并截取区域
-    try:
-        if table_regions and text_regions:
-            logger.info("开始处理表格区域和文本区域")
-            # 处理第一个表格（可以扩展为处理多个表格）
-            table_region = table_regions[0]
-            table_x1, table_y1, table_x2, table_y2 = table_region['bbox']
-            
-            # 收集符合条件的文本区域
-            matched_text_regions = []
-            for text_region in text_regions:
-                text_center_x, text_center_y = text_region['center']
-                if table_x1 <= text_center_x <= table_x2:
-                    matched_text_regions.append(text_region)
-            
-            # 确定纵坐标范围
-            if matched_text_regions:
-                top_y1 = min(min([text['bbox'][1] for text in matched_text_regions]), table_y1)
-                bottom_y2 = max(max([text['bbox'][3] for text in matched_text_regions]), table_y2)
-                logger.info(f"找到{len(matched_text_regions)}个匹配的文本区域，确定纵坐标范围: {top_y1}-{bottom_y2}")
-            else:
-                top_y1 = table_y1
-                bottom_y2 = table_y2
-                logger.info("未找到匹配的文本区域，使用表格区域的纵坐标范围")
-            
-            # 截取区域
-            h, w = rotated_img.shape[:2]
-            crop_x1 = max(0, table_x1)
-            crop_x2 = min(w, table_x2)
-            crop_y1 = max(0, top_y1)
-            crop_y2 = min(h, bottom_y2)
-            
-            # 截取图像
-            cropped_img = rotated_img[crop_y1:crop_y2, crop_x1:crop_x2]
-            logger.info(f"成功截取表格区域: 位置=({crop_x1},{crop_y1}), 尺寸={crop_x2-crop_x1}x{crop_y2-crop_y1}")
-            
-            # 将截取后的图像转换为可流式传输的格式
-            is_success, buffer = cv2.imencode(".jpg", cropped_img)
-            if not is_success:
-                logger.error("无法将截取的图像编码为JPEG格式")
-                raise Exception("无法将截取的图像编码为JPEG格式")
-            
-            # 保存截取后的图像（可选）
-            os.makedirs("./output", exist_ok=True)
-            cropped_img_path = f"./output/{timestamp}.jpg"
-            cv2.imwrite(cropped_img_path, cropped_img)
-            logger.info(f"已截取区域并保存到: {cropped_img_path}")
-            
-            # 返回截取后的图像
-            return StreamingResponse(
-                io.BytesIO(buffer.tobytes()),
-                media_type="image/jpeg"
-            )
-        else:
-            # 未找到表格区域或文本区域，返回原图
-            logger.warning("未找到表格区域或文本区域，将返回原图")
-            # 检查rotated_img是否为空，为空时使用原始图像
-            img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
-            # 将原图转换为可流式传输的格式
-            is_success, buffer = cv2.imencode(".jpg", img_to_encode)
-            if not is_success:
-                logger.error("无法将图像编码为JPEG格式")
-                raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
-            
-            # 返回原始图像
-            return StreamingResponse(
-                io.BytesIO(buffer.tobytes()),
-                media_type="image/jpeg"
-            )
-    except Exception as e:
-        # 处理过程中发生错误，返回原图
-        logger.error(f"表格处理过程中出错: {str(e)}，将返回原图")
-        # 检查rotated_img是否为空，为空时使用原始图像
-        img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
-        # 将原图转换为可流式传输的格式
-        is_success, buffer = cv2.imencode(".jpg", img_to_encode)
-        if not is_success:
-            logger.error("无法将图像编码为JPEG格式")
-            raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
-        
-        # 返回原始图像
-        return StreamingResponse(
-            io.BytesIO(buffer.tobytes()),
-            media_type="image/jpeg"
-        )
 
 
 @app.get("/")
