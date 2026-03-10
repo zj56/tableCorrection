@@ -441,12 +441,11 @@ def remove_binding_holes(img_bgr, table_x1, table_y1, table_x2, table_y2):
     result = img_bgr.copy()
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 在主矩形框外侧定义4个扫描区域
+    # 只扫描左右两侧区域：装订孔仅出现在左/右侧边缘
+    # 不扫描上下区域，避免将页码等内容误判为装订孔
     outer_regions = [
-        (0,        0,        table_x1, h),       # 左侧
-        (table_x2, 0,        w,        h),       # 右侧
-        (0,        0,        w,        table_y1), # 上侧
-        (0,        table_y2, w,        h),       # 下侧
+        (0,        0, table_x1, h),   # 左侧
+        (table_x2, 0, w,        h),   # 右侧
     ]
 
     total_removed = 0

@@ -51,7 +51,7 @@ def test_service(image_path, server_url="http://localhost:8001", output_dir=None
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # 保存矫正后的图片
-                output_filename = f"corrected_{Path(image_path).name}"
+                output_filename = Path(image_path).name
                 output_path = str(output_dir / output_filename)
 
                 with open(output_path, 'wb') as out_f:
@@ -83,7 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description='测试表格矫正服务')
     # parser.add_argument('--image', default=ROOT / "23.jpg", type=str, help='测试图片路径')
     parser.add_argument('--folder', type=str,default=ROOT / "lin", help='测试图片文件夹路径（批量处理）')
-    parser.add_argument('--server', type=str, default='http://localhost:8001', help='服务器地址')
+    parser.add_argument('--server', type=str, default='http://10.0.10.5:8001', help='服务器地址')
 
     args = parser.parse_args()
 
@@ -123,11 +123,13 @@ def main():
             if not subfolder.is_dir():
                 continue
 
-            # 获取子文件夹中的所有图片文件
-            image_files = []
+            # 获取子文件夹中的所有图片文件（使用 set 避免重复，Windows 上 glob 是不区分大小写的）
+            image_files_set = set()
             for ext in image_extensions:
-                image_files.extend(list(subfolder.glob(f'*{ext}')))
-                image_files.extend(list(subfolder.glob(f'*{ext.upper()}')))
+                image_files_set.update(subfolder.glob(f'*{ext}'))
+                image_files_set.update(subfolder.glob(f'*{ext.upper()}'))
+            
+            image_files = sorted(list(image_files_set))
 
             if not image_files:
                 print(f"⚠️ 警告: 在子文件夹 {subfolder.name} 中未找到支持的图片文件")
@@ -146,8 +148,7 @@ def main():
 
             # 逐个处理图片
             for i, image_path in enumerate(image_files, 1):
-                # file_path = f"file://{image_path}"
-                # messages = [
+          
                 print(f"处理图片 {i}/{len(image_files)}: {image_path.name}")
                 print("=" * 50)
 
