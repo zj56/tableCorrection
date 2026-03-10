@@ -423,6 +423,125 @@ def process_image_for_text(image, timestamp=None):
 
 
 
+def remove_edge_adjacent_table(image, area_ratio_threshold=0.05, edge_threshold=30, timestamp=None):
+    """
+    找到与图像边缘贴近的半幅表格轮廓，从其内侧竖线/横线处裁剪，
+    保留剩余的主体内容部分（去掉贴边的不完整表格）。
+
+    策略：
+      1. 灰度 → 高斯模糊 → Otsu 二值化 + 膨胀，连通细线
+      2. 查找外轮廓，只保留面积 > area_ratio_threshold * 图像面积 的轮廓
+      3. 保留「至少一条边与图像边缘距离 < edge_threshold」的轮廓
+      4. 按贴边方向找内侧边线，依次裁剪（去掉贴边区域，留下主体）：
+           - 右侧贴边表格：找所有右侧贴边轮廓的最小 x（内边线），裁剪为 [:, :min_x]
+           - 左侧贴边表格：找所有左侧贴边轮廓的最大 x2（内边线），裁剪为 [:, max_x2:]
+           - 下侧贴边表格：找所有下侧贴边轮廓的最小 y（内边线），裁剪为 [:min_y, :]
+           - 上侧贴边表格：找所有上侧贴边轮廓的最大 y2（内边线），裁剪为 [max_y2:, :]
+
+    参数:
+        image                : 输入 BGR 图像
+        area_ratio_threshold : 面积阈值（相对图像面积的比例）
+        edge_threshold       : 判断是否贴近边缘的像素距离阈值
+        timestamp            : 日志/调试文件时间戳
+
+    返回:
+        cropped_image : 去掉贴边表格后的图像；若未找到贴边矩形则返回 None
+    """
+    h, w = image.shape[:2]
+    min_area = area_ratio_threshold * h * w
+    logger.info(f"[RemoveEdge] 图像尺寸={w}x{h}, 最小面积阈值={min_area:.0f}")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    binary = cv2.dilate(binary, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    logger.info(f"[RemoveEdge] 检测到轮廓数量: {len(contours)}")
+
+    # 按贴边方向分桶存储轮廓 bounding box
+    right_boxes  = []  # 贴右边缘
+    left_boxes   = []  # 贴左边缘
+    bottom_boxes = []  # 贴下边缘
+    top_boxes    = []  # 贴上边缘
+
+    for cnt in contours:
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        area = bw * bh
+        if area < min_area:
+            continue
+        # 排除内部平均亮度极低的纯黑区块（装订孔等）
+        roi = gray[by:by+bh, bx:bx+bw]
+        if cv2.mean(roi)[0] < 40:
+            continue
+        near_left   = bx < edge_threshold
+        near_top    = by < edge_threshold
+        near_right  = (bx + bw) > (w - edge_threshold)
+        near_bottom = (by + bh) > (h - edge_threshold)
+        if not (near_left or near_top or near_right or near_bottom):
+            continue
+        edges = []
+        if near_right:  right_boxes.append((bx, by, bx+bw, by+bh));  edges.append('右')
+        if near_left:   left_boxes.append((bx, by, bx+bw, by+bh));    edges.append('左')
+        if near_bottom: bottom_boxes.append((bx, by, bx+bw, by+bh));  edges.append('下')
+        if near_top:    top_boxes.append((bx, by, bx+bw, by+bh));     edges.append('上')
+        logger.info(f"[RemoveEdge] 贴边轮廓: ({bx},{by})-({bx+bw},{by+bh}), 贴近: {edges}")
+
+    if not (right_boxes or left_boxes or bottom_boxes or top_boxes):
+        logger.info("[RemoveEdge] 未找到任何贴边大矩形")
+        return None
+
+    # 确定四个方向的裁剪边界（默认保留整幅图）
+    cut_x2 = w   # 右侧裁剪：保留 [:, :cut_x2]
+    cut_x1 = 0   # 左侧裁剪：保留 [:, cut_x1:]
+    cut_y2 = h   # 下侧裁剪：保留 [:cut_y2, :]
+    cut_y1 = 0   # 上侧裁剪：保留 [cut_y1:, :]
+
+    if right_boxes:
+        # 右侧贴边表格的内边线 = 所有右侧贴边轮廓的最小 x
+        inner_x = min(b[0] for b in right_boxes)
+        cut_x2 = inner_x
+        logger.info(f"[RemoveEdge] 右侧贴边表格，内边线 x={inner_x}，裁剪保留 [:, :{cut_x2}]")
+
+    if left_boxes:
+        # 左侧贴边表格的内边线 = 所有左侧贴边轮廓的最大 x2
+        inner_x2 = max(b[2] for b in left_boxes)
+        cut_x1 = inner_x2
+        logger.info(f"[RemoveEdge] 左侧贴边表格，内边线 x2={inner_x2}，裁剪保留 [:, {cut_x1}:]")
+
+    if bottom_boxes:
+        # 下侧贴边表格的内边线 = 所有下侧贴边轮廓的最小 y
+        inner_y = min(b[1] for b in bottom_boxes)
+        cut_y2 = inner_y
+        logger.info(f"[RemoveEdge] 下侧贴边表格，内边线 y={inner_y}，裁剪保留 [:{cut_y2}, :]")
+
+    if top_boxes:
+        # 上侧贴边表格的内边线 = 所有上侧贴边轮廓的最大 y2
+        inner_y2 = max(b[3] for b in top_boxes)
+        cut_y1 = inner_y2
+        logger.info(f"[RemoveEdge] 上侧贴边表格，内边线 y2={inner_y2}，裁剪保留 [{cut_y1}:, :]")
+
+    # 合理性检查
+    if cut_x1 >= cut_x2 or cut_y1 >= cut_y2:
+        logger.warning(f"[RemoveEdge] 裁剪范围无效: x=[{cut_x1},{cut_x2}], y=[{cut_y1},{cut_y2}]，返回 None")
+        return None
+
+    # 调试：保存标注图
+    if timestamp:
+        dbg = image.copy()
+        for b in right_boxes + left_boxes + bottom_boxes + top_boxes:
+            cv2.rectangle(dbg, (b[0], b[1]), (b[2], b[3]), (0, 0, 255), 2)
+        cv2.rectangle(dbg, (cut_x1, cut_y1), (cut_x2, cut_y2), (0, 255, 0), 3)
+        os.makedirs("./output_edge_rect", exist_ok=True)
+        cv2.imwrite(f"./output_edge_rect/{timestamp}.jpg", dbg)
+        logger.info(f"[RemoveEdge] 调试图已保存至 ./output_edge_rect/{timestamp}.jpg")
+
+    cropped = image[cut_y1:cut_y2, cut_x1:cut_x2]
+    logger.info(f"[RemoveEdge] 裁剪结果尺寸: {cropped.shape[1]}x{cropped.shape[0]}")
+    return cropped
+
+
 def remove_binding_holes(img_bgr, table_x1, table_y1, table_x2, table_y2):
     """
     使用霍夫圆检测，去除主表格矩形框外侧的装订孔（黑色圆点）。
@@ -724,10 +843,55 @@ async def correct_detection_table(
                         media_type="image/jpeg"
                     )
                 else:
-                    # 未发现相邻半幅表格，直接返回旋转矫正后的原图（装订孔已在前面去除）
-                    logger.info("未检测到相邻半幅表格，返回矫正后的原图")
-                    img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
-                    is_success, buffer = cv2.imencode(".jpg", img_to_encode)
+                    # 未发现相邻半幅表格；用 remove_edge_adjacent_table 再扫描一次
+                    # 目的：去掉紧贴图像边缘的不完整表格，保留剩余主体内容
+                    logger.info("未检测到相邻半幅表格，尝试用轮廓法去除贴边不完整表格")
+                    removed = remove_edge_adjacent_table(rotated_img, timestamp=timestamp)
+                    if removed is not None:
+                        logger.info("成功去除贴边表格，返回剩余主体")
+                        os.makedirs("./output", exist_ok=True)
+                        cv2.imwrite(f"./output/{timestamp}.jpg", removed)
+                        is_success, buffer = cv2.imencode(".jpg", removed)
+                        if not is_success:
+                            logger.error("无法将裁剪图像编码为JPEG格式")
+                            raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
+                        return StreamingResponse(
+                            io.BytesIO(buffer.tobytes()),
+                            media_type="image/jpeg"
+                        )
+                    else:
+                        # 轮廓法也未找到贴边表格，返回完整校正图
+                        logger.info("未找到贴边表格，返回矫正后的原图")
+                        img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
+                        is_success, buffer = cv2.imencode(".jpg", img_to_encode)
+                        if not is_success:
+                            logger.error("无法将图像编码为JPEG格式")
+                            raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
+                        return StreamingResponse(
+                            io.BytesIO(buffer.tobytes()),
+                            media_type="image/jpeg"
+                        )
+            else:
+                # get_max_rectangle 未能找到最大矩形框
+                # 退而求其次：用轮廓法检测贴边的不完整表格，去掉它，保留剩余主体
+                logger.warning("未能获取最大矩形框，尝试用轮廓法去除贴边不完整表格")
+                edge_img = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
+                removed = remove_edge_adjacent_table(edge_img, timestamp=timestamp)
+                if removed is not None:
+                    logger.info("成功去除贴边表格，返回剩余主体")
+                    os.makedirs("./output", exist_ok=True)
+                    cv2.imwrite(f"./output/{timestamp}.jpg", removed)
+                    is_success, buffer = cv2.imencode(".jpg", removed)
+                    if not is_success:
+                        logger.error("无法将裁剪图像编码为JPEG格式")
+                        raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
+                    return StreamingResponse(
+                        io.BytesIO(buffer.tobytes()),
+                        media_type="image/jpeg"
+                    )
+                else:
+                    logger.warning("未找到贴边表格，直接返回原图")
+                    is_success, buffer = cv2.imencode(".jpg", edge_img)
                     if not is_success:
                         logger.error("无法将图像编码为JPEG格式")
                         raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
@@ -735,22 +899,6 @@ async def correct_detection_table(
                         io.BytesIO(buffer.tobytes()),
                         media_type="image/jpeg"
                     )
-            else:
-                logger.warning("未能获取最大矩形框，直接返回原图")
-                # 检查rotated_img是否为空，为空时使用原始图像
-                img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
-                
-                # 将原图转换为可流式传输的格式
-                is_success, buffer = cv2.imencode(".jpg", img_to_encode)
-                if not is_success:
-                    logger.error("无法将图像编码为JPEG格式")
-                    raise HTTPException(status_code=500, detail="无法将图像编码为JPEG格式")
-                
-                # 返回原始图像
-                return StreamingResponse(
-                    io.BytesIO(buffer.tobytes()),
-                    media_type="image/jpeg"
-                )
                 
         except ImportError:
             logger.error("无法导入MaxRectangleDetector，请确保max_rectangle_detector.py文件存在")
