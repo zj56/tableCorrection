@@ -423,6 +423,63 @@ def process_image_for_text(image, timestamp=None):
 
 
 
+def remove_binding_holes(img_bgr, table_x1, table_y1, table_x2, table_y2):
+    """
+    使用霍夫圆检测，去除主表格矩形框外侧的装订孔（黑色圆点）。
+    检测到的圆点区域将用白色填充。
+
+    参数:
+        img_bgr  : 输入图像（BGR）
+        table_x1 : 主表格左边界（在 img_bgr 坐标系中）
+        table_y1 : 主表格上边界
+        table_x2 : 主表格右边界
+        table_y2 : 主表格下边界
+    返回:
+        去除装订孔后的图像副本
+    """
+    h, w = img_bgr.shape[:2]
+    result = img_bgr.copy()
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # 在主矩形框外侧定义4个扫描区域
+    outer_regions = [
+        (0,        0,        table_x1, h),       # 左侧
+        (table_x2, 0,        w,        h),       # 右侧
+        (0,        0,        w,        table_y1), # 上侧
+        (0,        table_y2, w,        h),       # 下侧
+    ]
+
+    total_removed = 0
+    for (rx1, ry1, rx2, ry2) in outer_regions:
+        if rx2 <= rx1 or ry2 <= ry1:
+            continue
+        roi_gray = gray[ry1:ry2, rx1:rx2]
+        # 高斯模糊降噪，有助于霍夫圆检测
+        blurred = cv2.GaussianBlur(roi_gray, (9, 9), 2)
+        circles = cv2.HoughCircles(
+            blurred,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=30,
+            param1=50,
+            param2=25,
+            minRadius=10,
+            maxRadius=60,
+        )
+        if circles is not None:
+            circles = np.round(circles[0, :]).astype(int)
+            for (cx, cy, r) in circles:
+                abs_cx = rx1 + int(cx)
+                abs_cy = ry1 + int(cy)
+                # 扩大半径，确保完整覆盖圆点边缘及残留黑色像素
+                cv2.circle(result, (abs_cx, abs_cy), int(r)+18, (255, 255, 255), -1)
+                total_removed += 1
+                logger.info(f"装订孔已去除: 圆心=({abs_cx},{abs_cy}), 半径={r}")
+
+    logger.info(f"霍夫圆检测共去除装订孔: {total_removed} 个")
+    return result
+
+
 def correct_image_orientation(img, orientation_model, timestamp=None):
         '''
         检测图像方向并进行旋转纠正
@@ -541,6 +598,13 @@ async def correct_detection_table(
                 
                 rect_w = x2 - x1
                 rect_h = y2 - y1
+                logger.info(f"[诊断] 主矩形框坐标: x1={x1}, y1={y1}, x2={x2}, y2={y2}, 图像尺寸={w}x{h}")
+                logger.info(f"[诊断] 左侧扫描宽度: {x1}px, 右侧扫描宽度: {w - x2}px")
+
+                # 在裁剪前去除主矩形框外侧的装订孔
+                # 此时图像完整，装订孔是完整圆形，HoughCircles 效果最佳
+                rotated_img = remove_binding_holes(rotated_img, x1, y1, x2, y2)
+                logger.info("已在裁剪前完成装订孔去除")
 
                 # -------------------------------------------------------
                 # 检测主矩形框外侧是否存在"半幅表格"
@@ -557,13 +621,15 @@ async def correct_detection_table(
                 half_table_found = False
                 half_table_side = None  # 'left' or 'right'
                 # 每段内某列暗像素占该段高度的最低比例（可调整）
-                ZONE_DARK_RATIO = 0.08
+                ZONE_DARK_RATIO = 0.05  # 降低阈值，提高对浅色线条的灵敏度
+                ZONE_MIN_SATISFY = 2    # 至少满足的段数（3段中至少2段），容忍半幅表格不覆盖全高的情况
 
                 def detect_vertical_lines_in_region(img_bgr, rx1, rx2, ry1, ry2):
                     """
                     三段密度检测：将 [ry1, ry2] 分成上、中、下三段，
                     对每段做灰度→二值化→按列求暗像素比例。
-                    若某列在三段中均 ≥ ZONE_DARK_RATIO，认为是贯通竖线。
+                    若某列在至少 ZONE_MIN_SATISFY 段中 ≥ ZONE_DARK_RATIO，
+                    认为是竖直边线（容忍半幅表格未覆盖全高的情况）。
                     返回 (是否找到, 符合列的原图 x 坐标列表)。
                     """
                     if rx1 >= rx2 or ry1 >= ry2:
@@ -577,19 +643,23 @@ async def correct_detection_table(
                     ]
                     # 各段的暗像素比例矩阵，shape = (n_zones, width)
                     zone_ratios = []
-                    for zs, ze in zones:
+                    zone_names = ["上段", "中段", "下段"]
+                    for idx, (zs, ze) in enumerate(zones):
                         roi = img_bgr[zs:ze, rx1:rx2]
                         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                         # 简单阈值：<180 视为暗（线条像素）
                         dark_mask = (gray < 180).astype(np.float32)
                         ratio = dark_mask.mean(axis=0)  # shape: (width,)
                         zone_ratios.append(ratio)
-                    # 三段均满足密度阈值的列
-                    combined = np.ones(rx2 - rx1, dtype=bool)
+                        logger.debug(f"[诊断] 区域x=[{rx1},{rx2}] {zone_names[idx]} 最大暗像素密度: {ratio.max():.4f} (阈值={ZONE_DARK_RATIO})")
+                    # 统计每列满足阈值的段数，至少 ZONE_MIN_SATISFY 段即认为是竖线
+                    satisfy_count = np.zeros(rx2 - rx1, dtype=int)
                     for r in zone_ratios:
-                        combined &= (r >= ZONE_DARK_RATIO)
+                        satisfy_count += (r >= ZONE_DARK_RATIO).astype(int)
+                    combined = satisfy_count >= ZONE_MIN_SATISFY
                     cols = np.where(combined)[0]
                     abs_cols = [rx1 + int(c) for c in cols]
+                    logger.debug(f"[诊断] 区域x=[{rx1},{rx2}] 满足条件的列数: {len(abs_cols)}")
                     return len(abs_cols) > 0, abs_cols
 
                 # 扫描左侧区域（从 0 到 x1）
@@ -612,26 +682,33 @@ async def correct_detection_table(
                     logger.info(f"检测到右侧半幅表格，外边线 x 坐标: {right_line_cols}")
 
                 if half_table_found:
-                    # 存在半幅表格，按半幅表格边线裁剪：
-                    # 左侧：从左外边线(min) 到右页边缘 → 去掉左侧细边距
-                    # 右侧：从左页边缘 到右内边线(min) → 去掉右侧半表格
+                    # 存在半幅表格，按最靠近主矩形的外边线裁剪（含去除外边线本身）：
+                    # 左侧：取 left_line_cols 最大值（最靠近 x1）+ 1，从该点向右裁剪
+                    # 右侧：取 right_line_cols 最小值（最靠近 x2），裁剪到该点（不含）
                     if found_left and found_right:
-                        crop_x1 = min(left_line_cols)
+                        crop_x1 = max(left_line_cols) + 1
                         crop_x2 = min(right_line_cols)
-                        logger.info(f"两侧均有半幅表格，从左外边线x={crop_x1}截到右内边线x={crop_x2}")
+                        logger.info(f"两侧均有半幅表格，从左最近外边线x={crop_x1}截到右最近外边线x={crop_x2}")
                     elif found_left:
-                        crop_x1 = min(left_line_cols)
+                        crop_x1 = max(left_line_cols) + 1
                         crop_x2 = img_w
-                        logger.info(f"左侧有半幅表格，从外边线x={crop_x1}截到右页边缘x={crop_x2}")
+                        logger.info(f"左侧有半幅表格，从最近外边线x={crop_x1}截到右页边缘x={crop_x2}")
                     else:  # found_right only
                         crop_x1 = 0
                         crop_x2 = min(right_line_cols)
-                        logger.info(f"右侧有半幅表格，从左页边缘x=0截到右内边线x={crop_x2}")
+                        logger.info(f"右侧有半幅表格，从左页边缘x=0截到最近外边线x={crop_x2}")
 
                     crop_y1 = 0
                     crop_y2 = img_h
                     cropped_img = rotated_img[crop_y1:crop_y2, crop_x1:crop_x2]
                     logger.info(f"裁剪后区域: 位置=({crop_x1},{crop_y1}), 尺寸={crop_x2-crop_x1}x{crop_y2-crop_y1}")
+
+                    # 在裁剪后的图像中，重新计算主表格矩形框的坐标（相对于裁剪后坐标系）
+                    adj_x1 = max(0, x1 - crop_x1)
+                    adj_x2 = max(0, x2 - crop_x1)
+                    adj_y1 = max(0, y1 - crop_y1)
+                    adj_y2 = max(0, y2 - crop_y1)
+                    logger.info(f"裁剪后主表格区域（新坐标系）: ({adj_x1},{adj_y1})-({adj_x2},{adj_y2})")
 
                     is_success, buffer = cv2.imencode(".jpg", cropped_img)
                     if not is_success:
@@ -648,7 +725,7 @@ async def correct_detection_table(
                         media_type="image/jpeg"
                     )
                 else:
-                    # 未发现相邻半幅表格，直接返回旋转矫正后的原图
+                    # 未发现相邻半幅表格，直接返回旋转矫正后的原图（装订孔已在前面去除）
                     logger.info("未检测到相邻半幅表格，返回矫正后的原图")
                     img_to_encode = rotated_img if rotated_img is not None and len(rotated_img.shape) > 1 else img
                     is_success, buffer = cv2.imencode(".jpg", img_to_encode)
