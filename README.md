@@ -78,6 +78,8 @@ docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-c
 
 docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9 /bin/bash
 
+
+
 apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0
 
 
@@ -85,6 +87,7 @@ root@esc8000-g4:/home# cd /paddle/
 root@esc8000-g4:/paddle# nvidia-smi
 
 
+docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it tablecorrection:20260304 /bin/bash
 
 ```
 
