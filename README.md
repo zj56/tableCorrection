@@ -76,7 +76,7 @@
 ```
 docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9
 
-docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9 /bin/bash
+docker run --gpus all --name paddle_ocr -v $PWD:/paddle --network=host -it ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda11.8-cudnn8.9 /bin/bash
 
 
 
@@ -87,7 +87,7 @@ root@esc8000-g4:/home# cd /paddle/
 root@esc8000-g4:/paddle# nvidia-smi
 
 
-docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it tablecorrection:20260304 /bin/bash
+
 
 ```
 
@@ -104,6 +104,11 @@ docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it ta
 pip install fastapi uvicorn paddleocr opencv-python loguru python-multipart
 ```
 
+
+~~~
+容器打包部署
+docker run --gpus all --name paddle_docker -v $PWD:/paddle --network=host -it tablecorrection:20260304 /bin/bash
+~~~
 ### 环境变量配置
 
 - `LOG_LEVEL`: 日志级别 (默认: DEBUG)
